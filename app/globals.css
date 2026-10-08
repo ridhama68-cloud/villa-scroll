@@ -33,3 +33,13 @@ body {
   overflow-x: hidden;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
+
+/* Luxury custom cursor for fine pointers */
+@media (pointer: fine) {
+  body {
+    cursor: none;
+  }
+  a, button, [role="button"], select {
+    cursor: none;
+  }
+}

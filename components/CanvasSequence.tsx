@@ -21,6 +21,8 @@ export interface CanvasSequenceProps {
   frameExtension?: string;
   /** Digit padding length (default: 4) */
   padDigits?: number;
+  /** Maximum device pixel ratio to cap at for high-DPI screens (default: 2) */
+  maxDpr?: number;
   /** Callback on frame change with current 1-based frame and progress (0 to 1) */
   onFrameChange?: (frameIndex: number, progress: number) => void;
   /** Callback fired when the initial 150 frames finish preloading */
@@ -40,6 +42,7 @@ export default function CanvasSequence({
   framePrefix = "/frames/frame_",
   frameExtension = ".jpg",
   padDigits = 4,
+  maxDpr = 2,
   onFrameChange,
   onInitialLoadComplete,
   onAllFramesLoaded,
@@ -90,46 +93,51 @@ export default function CanvasSequence({
     [framePrefix, padDigits, frameExtension]
   );
 
-  // Draw an image onto the canvas with cover sizing and HiDPI Retina support
-  const drawToCanvas = useCallback((img: HTMLImageElement) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx || !img || !img.complete || img.naturalWidth === 0) return;
+  // Draw an image onto the canvas with physical Retina resolution & high-quality smoothing
+  const drawToCanvas = useCallback(
+    (img: HTMLImageElement) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx || !img || !img.complete || img.naturalWidth === 0) return;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-    if (width === 0 || height === 0) return;
+      // 1. Calculate device pixel ratio capped at maxDpr (1.5 - 2)
+      const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+      const clientW = canvas.clientWidth || window.innerWidth;
+      const clientH = canvas.clientHeight || window.innerHeight;
+      if (clientW === 0 || clientH === 0) return;
 
-    const displayW = Math.round(width * dpr);
-    const displayH = Math.round(height * dpr);
+      // 2. Multiply canvas width & height by DPR for crisp high-DPI rendering
+      const bufferW = Math.round(clientW * dpr);
+      const bufferH = Math.round(clientH * dpr);
 
-    if (canvas.width !== displayW || canvas.height !== displayH) {
-      canvas.width = displayW;
-      canvas.height = displayH;
-    }
+      if (canvas.width !== bufferW || canvas.height !== bufferH) {
+        canvas.width = bufferW;
+        canvas.height = bufferH;
+      }
 
-    ctx.save();
-    ctx.scale(dpr, dpr);
+      // 3. Calculate aspect-ratio cover directly in buffer pixels to eliminate subpixel blur
+      const imgW = img.naturalWidth;
+      const imgH = img.naturalHeight;
+      const scale = Math.max(bufferW / imgW, bufferH / imgH);
 
-    // Object-fit: cover calculation
-    const imgW = img.naturalWidth;
-    const imgH = img.naturalHeight;
-    const ratio = Math.max(width / imgW, height / imgH);
+      const renderW = Math.round(imgW * scale);
+      const renderH = Math.round(imgH * scale);
+      const shiftX = Math.round((bufferW - renderW) / 2);
+      const shiftY = Math.round((bufferH - renderH) / 2);
 
-    const renderW = imgW * ratio;
-    const renderH = imgH * ratio;
-    const shiftX = (width - renderW) / 2;
-    const shiftY = (height - renderH) / 2;
+      // 4. Clear frame buffer
+      ctx.clearRect(0, 0, bufferW, bufferH);
 
-    ctx.clearRect(0, 0, width, height);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(img, 0, 0, imgW, imgH, shiftX, shiftY, renderW, renderH);
+      // 5. Ensure high-quality image smoothing before drawing
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
 
-    ctx.restore();
-  }, []);
+      // 6. Draw the image crisp and un-distorted
+      ctx.drawImage(img, 0, 0, imgW, imgH, shiftX, shiftY, renderW, renderH);
+    },
+    [maxDpr]
+  );
 
   // Render a specific frame index (or closest loaded frame)
   const renderFrame = useCallback(
@@ -203,7 +211,7 @@ export default function CanvasSequence({
     [getFrameUrl]
   );
 
-  // Resize listener: redraw current frame on resize
+  // Resize listener: redraw current frame on resize with updated dimensions & DPR
   useEffect(() => {
     const handleResize = () => {
       renderFrame(currentFrameRef.current);
@@ -266,7 +274,7 @@ export default function CanvasSequence({
 
       if (isCancelledRef.current) return;
 
-      // Ensure Frame 1 is painted
+      // Ensure Frame 1 is painted crisp
       if (imagesCache.current[1]) {
         drawToCanvas(imagesCache.current[1]!);
       }
@@ -335,13 +343,6 @@ export default function CanvasSequence({
   }, [totalFrames, initialFramesCount, loadSingleFrame, drawToCanvas]);
 
   // Phase 3: Pinned ScrollTrigger scrubbing setup (STRICT REQUIREMENTS)
-  // 1. One pinned ScrollTrigger section.
-  // 2. Direct mouse wheel / touch scroll controls the frame number.
-  // 3. No autoplay, no setInterval, no animation loop.
-  // 4. Frame changes ONLY when ScrollTrigger progress changes.
-  // 5. When scrolling stops, current frame stays FROZEN.
-  // 6. Reverse scrolling reverses frames perfectly.
-  // 7. requestAnimationFrame is used ONLY to render after scroll updates.
   useEffect(() => {
     if (!isPreloaderDone || !pinSectionRef.current) return;
 
@@ -357,18 +358,16 @@ export default function CanvasSequence({
       scrub: 0,
       anticipatePin: 1,
       onUpdate: (self) => {
-        // Requirement 9: Map ScrollTrigger progress (0 to 1) to image sequence
         const progress = self.progress;
         const targetFrame = Math.min(
           totalFrames,
           Math.max(1, Math.floor(progress * (totalFrames - 1)) + 1)
         );
 
-        // Requirement 10: Redraw the canvas ONLY when the calculated frame changes
+        // Redraw canvas ONLY when calculated frame changes
         if (targetFrame !== currentFrameRef.current) {
           currentFrameRef.current = targetFrame;
 
-          // Requirement 15: Use requestAnimationFrame ONLY to render after scroll updates
           if (!renderPendingRef.current) {
             renderPendingRef.current = true;
             requestAnimationFrame(() => {
@@ -392,10 +391,11 @@ export default function CanvasSequence({
       ref={pinSectionRef}
       className={`relative w-full h-screen overflow-hidden bg-[#090a0f] select-none ${className}`}
     >
-      {/* HTML5 Canvas */}
+      {/* HTML5 Canvas: Native 100% scale without CSS object-cover distortion */}
       <canvas
         ref={canvasRef}
-        className="absolute inset-0 w-full h-full block object-cover pointer-events-none will-change-transform"
+        style={{ filter: "contrast(1.05) saturate(1.1) brightness(0.95)" }}
+        className="absolute inset-0 w-full h-full block pointer-events-none will-change-transform"
       />
 
       {/* Children overlays (such as text titles) pinned alongside the canvas */}
